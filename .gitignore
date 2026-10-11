@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch weights and model checkpoints
+weights/
+*.pt
+*.pth
+*.onnx
+
+# Data & Large Archives (Prevent committing ~90MB+ dataset images and staged zips)
+data/raw/
+data/partitions/
+data/public_reference/
+data/val/
+*.zip
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Streamlit
+.streamlit/
+notes.txt
