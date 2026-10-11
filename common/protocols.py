@@ -70,3 +70,14 @@ class RoundMetrics(BaseModel):
     agreement_score: float = 0.0
     val_accuracy: Dict[str, float] = Field(default_factory=dict)
     ensemble_val_accuracy: float = 0.0
+
+
+class DistributionStatusReport(BaseModel):
+    client_id: str
+    distribution_id: int
+    status: str  # pending, downloading, ready, error
+    message: Optional[str] = ""
+    train_samples: Optional[int] = 0
+    val_samples: Optional[int] = 0
+    public_samples: Optional[int] = 0
+

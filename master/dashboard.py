@@ -91,6 +91,36 @@ st.markdown("""
         border: 1px solid #CBD5E1;
         border-radius: 4px;
     }
+    .status-badge-warning {
+        display: inline-block;
+        padding: 0.25rem 0.65rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: #92400E;
+        background-color: #FEF3C7;
+        border: 1px solid #FDE68A;
+        border-radius: 4px;
+    }
+    .status-badge-info {
+        display: inline-block;
+        padding: 0.25rem 0.65rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: #1E40AF;
+        background-color: #DBEAFE;
+        border: 1px solid #BFDBFE;
+        border-radius: 4px;
+    }
+    .status-badge-error {
+        display: inline-block;
+        padding: 0.25rem 0.65rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: #991B1B;
+        background-color: #FEE2E2;
+        border: 1px solid #FECACA;
+        border-radius: 4px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -317,7 +347,65 @@ with tab_dataset:
                 st.error(err)
 
         if st.button("Distribute Dataset Packages", type="primary", use_container_width=True):
-            st.info("Connected worker laptops will download and unpack their assigned partition automatically upon connection.")
+            if not active_client_ids:
+                st.warning("No worker laptops are currently registered. Launch worker clients first before distributing.")
+            else:
+                dist_trigger = fetch_api("/api/trigger_distribution", method="POST")
+                if not dist_trigger or dist_trigger.get("error"):
+                    err = dist_trigger.get("error") if dist_trigger else "Coordinator unreachable"
+                    st.error(f"Failed to initiate distribution: {err}")
+                else:
+                    dist_id = dist_trigger.get("distribution_id", 1)
+                    target_nodes = dist_trigger.get("target_clients", [])
+                    st.info(f"Distribution signal broadcast (Batch ID: {dist_id}). Awaiting {len(target_nodes)} worker nodes to purge old data, download, and verify...")
+
+                    status_container = st.empty()
+                    timeout_sec = 60
+                    start_time = time.time()
+                    all_synced = False
+
+                    while (time.time() - start_time) < timeout_sec:
+                        time.sleep(0.6)
+                        dist_state = fetch_api("/api/distribution_state")
+                        if not dist_state:
+                            continue
+
+                        client_statuses = dist_state.get("clients", {})
+
+                        with status_container.container():
+                            st.markdown("###### Worker Distribution Status")
+                            for cid in target_nodes:
+                                c_info = client_statuses.get(cid, {})
+                                c_stat = c_info.get("status", "pending")
+                                c_msg = c_info.get("message", "Awaiting response...")
+                                n_tr = c_info.get("train_samples", 0)
+                                n_val = c_info.get("val_samples", 0)
+
+                                if c_stat == "ready":
+                                    badge = '<span class="status-badge-active">READY</span>'
+                                    extra = f" ({n_tr} train, {n_val} val)"
+                                elif c_stat == "downloading":
+                                    badge = '<span class="status-badge-info">PURGING & DOWNLOADING</span>'
+                                    extra = ""
+                                elif c_stat == "error":
+                                    badge = '<span class="status-badge-error">ERROR</span>'
+                                    extra = f" - {c_msg}"
+                                else:
+                                    badge = '<span class="status-badge-warning">PENDING</span>'
+                                    extra = ""
+
+                                st.markdown(f"- **{cid}**: {badge} {extra}", unsafe_allow_html=True)
+
+                        if dist_state.get("all_ready"):
+                            all_synced = True
+                            break
+
+                    if all_synced:
+                        st.success("All connected worker nodes successfully purged previous datasets, downloaded fresh packages, and verified DataLoaders.")
+                        time.sleep(1.5)
+                        st.rerun()
+                    else:
+                        st.warning("Distribution timed out or some worker nodes did not report ready. Check worker terminal logs.")
 
     with col_d2:
         st.markdown("##### Non-IID Partitioning Rationale")
@@ -350,6 +438,22 @@ with tab_dataset:
         )
         st.plotly_chart(fig_bar, use_container_width=True)
 
+    # Persistent Worker Node Dataset Staging Status
+    dist_info = fetch_api("/api/distribution_state")
+    if dist_info and dist_info.get("clients"):
+        st.markdown("##### Worker Node Dataset Staging Status")
+        sync_rows = []
+        for cid, cdata in dist_info["clients"].items():
+            sync_rows.append({
+                "Worker Identifier": cid,
+                "Status": cdata.get("status", "unknown").upper(),
+                "Train Samples": cdata.get("train_samples", 0),
+                "Validation Samples": cdata.get("val_samples", 0),
+                "Public Reference": cdata.get("public_samples", 0),
+                "Detail": cdata.get("message", ""),
+            })
+        st.dataframe(pd.DataFrame(sync_rows), use_container_width=True, hide_index=True)
+
 
 # ==============================================================================
 # TAB 3: TRAINING CONTROL & LIVE TELEMETRY
@@ -366,18 +470,22 @@ with tab_training:
         temperature = st.slider("Distillation Temperature (tau)", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
 
     if st.button("Start Federated Distillation", type="primary"):
-        with st.spinner("Dispatching training instructions to edge nodes..."):
-            res = fetch_api("/api/start_training", method="POST", data={
-                "total_rounds": num_rounds,
-                "local_epochs": local_epochs,
-                "batch_size": 32,
-                "temperature": temperature,
-                "alpha": 0.5,
-            })
-            if res and res.get("status") == "started":
-                st.success(f"Distillation cycle initiated for {num_rounds} communication rounds.")
-            else:
-                st.error("Failed to start training. Verify that worker clients are registered.")
+        dist_check = fetch_api("/api/distribution_state")
+        if dist_check and not dist_check.get("all_ready", False) and dist_check.get("distribution_id", 0) == 0:
+            st.warning("Datasets have not been distributed to worker nodes yet. Please distribute datasets in Tab 2 before starting training.")
+        else:
+            with st.spinner("Dispatching training instructions to edge nodes..."):
+                res = fetch_api("/api/start_training", method="POST", data={
+                    "total_rounds": num_rounds,
+                    "local_epochs": local_epochs,
+                    "batch_size": 32,
+                    "temperature": temperature,
+                    "alpha": 0.5,
+                })
+                if res and res.get("status") == "started":
+                    st.success(f"Distillation cycle initiated for {num_rounds} communication rounds.")
+                else:
+                    st.error("Failed to start training. Verify that worker clients are registered.")
 
     st.divider()
     st.markdown("##### Real-Time Telemetry")

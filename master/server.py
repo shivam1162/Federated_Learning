@@ -28,6 +28,7 @@ from common.protocols import (
     LogitSubmissionRequest,
     ConsensusResponse,
     RoundMetrics,
+    DistributionStatusReport,
 )
 from master.partitioner import partition_dataset_non_iid, download_eurosat
 
@@ -68,8 +69,10 @@ class MasterState:
         self.history: List[RoundMetrics] = []
         # Partition statistics
         self.partition_stats: Dict[str, Dict[str, int]] = {}
-        # Download status
-        self.dataset_status: str = "Ready"
+        # Dataset distribution tracking
+        self.distribution_id: int = 0
+        self.distribution_active: bool = False
+        self.distribution_status: Dict[str, Dict[str, Any]] = {}
 
 state = MasterState()
 
@@ -107,6 +110,17 @@ def register_client(req: ClientRegistrationRequest, request: Request):
         current_round=state.current_round,
         is_training=state.training_active,
     )
+
+    # If a distribution is already active or staged, initialize entry for this client
+    if state.distribution_id > 0 and req.client_id not in state.distribution_status:
+        state.distribution_status[req.client_id] = {
+            "status": "pending",
+            "message": "Newly registered. Awaiting dataset download...",
+            "train_samples": 0,
+            "val_samples": 0,
+            "public_samples": 0,
+            "timestamp": time.time(),
+        }
 
     return ClientRegistrationResponse(
         status="success",
@@ -250,20 +264,106 @@ def download_partition(client_id: str):
     """
     zip_path = PARTITIONS_DIR / f"{client_id}.zip"
     if not zip_path.exists():
-        # Auto-generate if partition doesn't exist yet
-        client_ids = list(state.clients.keys()) or [client_id]
-        if client_id not in client_ids:
-            client_ids.append(client_id)
-        partition_dataset_non_iid(client_ids=client_ids)
-
-    if not zip_path.exists():
-        raise HTTPException(status_code=404, detail=f"Partition archive for {client_id} not found.")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Partition archive for '{client_id}' not found on Coordinator. Please click 'Generate Non-IID Partitions' first."
+        )
 
     return FileResponse(
         path=zip_path,
         media_type="application/zip",
         filename=f"{client_id}.zip"
     )
+
+
+@app.post("/api/trigger_distribution")
+def trigger_distribution():
+    """
+    Signals all registered worker clients to delete their existing local data,
+    download the staged partition package, and reinitialize their data loaders.
+    """
+    # 1. Verify partition packages exist on Coordinator
+    if not PARTITIONS_DIR.exists() or not list(PARTITIONS_DIR.glob("*.zip")):
+        raise HTTPException(
+            status_code=400,
+            detail="No partition packages found in data/partitions/. Please click 'Generate Non-IID Partitions' first."
+        )
+
+    # 2. Verify registered clients
+    if not state.clients:
+        raise HTTPException(
+            status_code=400,
+            detail="No worker nodes registered. Launch worker clients first before distributing."
+        )
+
+    state.distribution_id += 1
+    state.distribution_active = True
+    state.distribution_status = {}
+
+    for cid in state.clients:
+        state.distribution_status[cid] = {
+            "status": "pending",
+            "message": "Awaiting worker response...",
+            "train_samples": 0,
+            "val_samples": 0,
+            "public_samples": 0,
+            "timestamp": time.time(),
+        }
+
+    return {
+        "status": "started",
+        "distribution_id": state.distribution_id,
+        "target_clients": list(state.clients.keys()),
+    }
+
+
+@app.get("/api/distribution_state")
+def get_distribution_state():
+    """Returns the live dataset distribution status across all active clients."""
+    registered_cids = list(state.clients.keys())
+    if not registered_cids or state.distribution_id == 0:
+        return {
+            "distribution_id": state.distribution_id,
+            "distribution_active": state.distribution_active,
+            "all_ready": False,
+            "clients": state.distribution_status,
+        }
+
+    all_ready = (
+        len(state.distribution_status) >= len(registered_cids)
+        and all(
+            state.distribution_status.get(cid, {}).get("status") == "ready"
+            for cid in registered_cids
+        )
+    )
+
+    if all_ready and state.distribution_active:
+        state.distribution_active = False
+
+    return {
+        "distribution_id": state.distribution_id,
+        "distribution_active": state.distribution_active,
+        "all_ready": all_ready,
+        "clients": state.distribution_status,
+    }
+
+
+@app.post("/api/report_distribution_status")
+def report_distribution_status(req: DistributionStatusReport):
+    """Receives distribution progress or completion reports from worker clients."""
+    state.distribution_status[req.client_id] = {
+        "status": req.status,
+        "message": req.message or "",
+        "train_samples": req.train_samples or 0,
+        "val_samples": req.val_samples or 0,
+        "public_samples": req.public_samples or 0,
+        "timestamp": time.time(),
+    }
+
+    if req.client_id in state.clients:
+        state.clients[req.client_id].last_seen = time.time()
+
+    return {"status": "recorded"}
 
 
 @app.post("/api/start_training")
@@ -301,6 +401,7 @@ def get_round_state():
         "current_round": state.current_round,
         "total_rounds": state.total_rounds,
         "stage": state.stage,
+        "distribution_id": state.distribution_id,
         "local_epochs": state.local_epochs,
         "batch_size": state.batch_size,
         "temperature": state.temperature,

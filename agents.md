@@ -307,8 +307,8 @@ python client/client.py --master_ip <MASTER_IP> --client_id client_2 --model mob
 2. **Tab 1 (Cluster Topology)**: Confirm connected worker laptops appear with `[ACTIVE]` status badges and their respective model architectures.
 3. **Tab 2 (Dataset Management)**:
    * Select your **Dataset Allocation Mode** (Fast Demo Mode or Full Dataset Mode).
-   * Click **"Generate Non-IID Partitions"** and watch the live progress bar as partitions are staged.
-   * Click **"Distribute Dataset Packages"** (clients automatically fetch their assigned `.zip` archives over LAN).
+   * Click **"Generate Non-IID Partitions"**: Partitions are generated and staged strictly on Master (`data/partitions/`) with a real-time progress bar. Zero network distribution happens at this step.
+   * Click **"Distribute Dataset Packages"**: Broadcasts a distribution command to all registered edge nodes. Connected workers purge their previous local dataset (`data/{client_id}/`), download the fresh `.zip` archive over Wi-Fi, extract it, initialize PyTorch DataLoaders, and report back `[READY]` with sample counts. Streamlit displays live progress per worker node.
 4. **Tab 3 (Training Telemetry)**:
    * Select the number of FL rounds (e.g., 5) and local CPU epochs (e.g., 2).
    * Click **"Start Federated Distillation"**.

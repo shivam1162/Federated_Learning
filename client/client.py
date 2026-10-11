@@ -54,6 +54,10 @@ class FedMDClient:
 
         self.trainer = LocalTrainer(self.model, device=self.device)
         self.last_completed_round = 0
+        self.train_loader = None
+        self.val_loader = None
+        self.public_loader = None
+        self.current_distribution_id = 0
 
     def register(self) -> bool:
         """Sends registration handshake to Master coordinator."""
@@ -73,33 +77,123 @@ class FedMDClient:
             print(f"[{self.client_id}] Cannot connect to Master at {self.master_url}: {e}")
         return False
 
-    def download_and_unpack_partition(self) -> bool:
-        """Downloads assigned Non-IID dataset archive from Master and unpacks locally."""
-        print(f"[{self.client_id}] Requesting partition package from Master...")
+    def handle_distribution(self, distribution_id: int) -> bool:
+        """
+        Executes explicit dataset distribution lifecycle:
+        1. Reports 'downloading' status to Master.
+        2. Force-deletes any existing local dataset directory.
+        3. Downloads assigned partition ZIP archive from Master.
+        4. Extracts archive into data/{client_id}/.
+        5. Re-initializes PyTorch data loaders.
+        6. Reports 'ready' status with verified sample counts back to Master.
+        """
+        print(f"\n[{self.client_id}] ==================================================")
+        print(f"[{self.client_id}] DISTRIBUTION SIGNAL RECEIVED (Batch ID: {distribution_id})")
+        print(f"[{self.client_id}] ==================================================")
+
+        # 1. Report downloading status
         try:
-            res = requests.get(f"{self.master_url}/api/download_partition/{self.client_id}", stream=True, timeout=30)
-            if res.status_code == 200:
-                zip_path = Path(f"{self.client_id}_temp.zip")
-                with open(zip_path, "wb") as f:
-                    for chunk in res.iter_content(chunk_size=8192):
+            requests.post(
+                f"{self.master_url}/api/report_distribution_status",
+                json={
+                    "client_id": self.client_id,
+                    "distribution_id": distribution_id,
+                    "status": "downloading",
+                    "message": "Purging old dataset and downloading new package...",
+                },
+                timeout=5,
+            )
+        except Exception as e:
+            print(f"[{self.client_id}] Could not report downloading status: {e}")
+
+        # 2. Force delete existing local dataset directory
+        if self.base_dir.exists():
+            print(f"[{self.client_id}] Purging existing local dataset at {self.base_dir}...")
+            try:
+                shutil.rmtree(self.base_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"[{self.client_id}] Warning while purging old data: {e}")
+
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+
+        # 3. Download fresh partition archive from Master
+        print(f"[{self.client_id}] Downloading partition package from Master: {self.master_url}/api/download_partition/{self.client_id}")
+        zip_path = Path(f"{self.client_id}_temp.zip")
+        try:
+            res = requests.get(f"{self.master_url}/api/download_partition/{self.client_id}", stream=True, timeout=90)
+            if res.status_code != 200:
+                err_msg = f"Download failed ({res.status_code}): {res.text}"
+                print(f"[{self.client_id}] Error: {err_msg}")
+                self._report_distribution_error(distribution_id, err_msg)
+                return False
+
+            with open(zip_path, "wb") as f:
+                for chunk in res.iter_content(chunk_size=16384):
+                    if chunk:
                         f.write(chunk)
 
-                # Unpack
-                if self.base_dir.exists():
-                    shutil.rmtree(self.base_dir)
-                self.base_dir.mkdir(parents=True, exist_ok=True)
+            # 4. Extract archive
+            print(f"[{self.client_id}] Extracting partition archive into {self.base_dir}...")
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                zip_ref.extractall(self.base_dir)
 
-                with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                    zip_ref.extractall(self.base_dir)
-
+            if zip_path.exists():
                 zip_path.unlink()
-                print(f"[{self.client_id}] Partition downloaded and unpacked to {self.base_dir}")
-                return True
-            else:
-                print(f"[{self.client_id}] Failed to download partition: {res.status_code} {res.text}")
+
+            # 5. Build and verify data loaders
+            print(f"[{self.client_id}] Initializing PyTorch DataLoaders...")
+            self.train_loader, self.val_loader = get_client_dataloaders(str(self.private_data_dir), batch_size=32)
+            self.public_loader = get_public_dataloader(str(self.public_ref_dir), batch_size=32)
+
+            n_train = len(self.train_loader.dataset)
+            n_val = len(self.val_loader.dataset)
+            n_pub = len(self.public_loader.dataset)
+
+            print(f"[{self.client_id}] Dataset verified: {n_train} train, {n_val} val, {n_pub} public reference images.")
+            self.current_distribution_id = distribution_id
+
+            # 6. Report ready to Master
+            requests.post(
+                f"{self.master_url}/api/report_distribution_status",
+                json={
+                    "client_id": self.client_id,
+                    "distribution_id": distribution_id,
+                    "status": "ready",
+                    "message": "Dataset successfully installed and verified.",
+                    "train_samples": n_train,
+                    "val_samples": n_val,
+                    "public_samples": n_pub,
+                },
+                timeout=5,
+            )
+            print(f"[{self.client_id}] Distribution confirmed [READY] to Master.")
+            return True
+
         except Exception as e:
-            print(f"[{self.client_id}] Error downloading partition: {e}")
-        return False
+            err_msg = f"Distribution failed: {e}"
+            print(f"[{self.client_id}] {err_msg}")
+            if zip_path.exists():
+                try:
+                    zip_path.unlink()
+                except Exception:
+                    pass
+            self._report_distribution_error(distribution_id, err_msg)
+            return False
+
+    def _report_distribution_error(self, distribution_id: int, message: str):
+        try:
+            requests.post(
+                f"{self.master_url}/api/report_distribution_status",
+                json={
+                    "client_id": self.client_id,
+                    "distribution_id": distribution_id,
+                    "status": "error",
+                    "message": message,
+                },
+                timeout=5,
+            )
+        except Exception:
+            pass
 
     def send_heartbeat(self):
         """Sends lightweight presence update."""
@@ -113,17 +207,7 @@ class FedMDClient:
         Main worker daemon loop: listens for Master round states, executes local CE training,
         uploads reference logits, and distills from ensemble consensus.
         """
-        # Ensure partition exists
-        if not (self.private_data_dir.exists() and self.public_ref_dir.exists()):
-            self.download_and_unpack_partition()
-
-        # Build data loaders
-        print(f"[{self.client_id}] Loading private and public datasets...")
-        train_loader, val_loader = get_client_dataloaders(str(self.private_data_dir), batch_size=32)
-        public_loader = get_public_dataloader(str(self.public_ref_dir), batch_size=32)
-        print(f"[{self.client_id}] Private samples: {len(train_loader.dataset)} train, {len(val_loader.dataset)} val | Public reference: {len(public_loader.dataset)}")
-
-        print(f"[{self.client_id}] Listening for federated training rounds...")
+        print(f"[{self.client_id}] Worker daemon active. Waiting for dataset distribution and training rounds...")
         
         while True:
             time.sleep(1.5)
@@ -137,8 +221,30 @@ class FedMDClient:
             except Exception:
                 continue
 
+            # Check for Dataset Distribution Trigger from Master
+            dist_id = state.get("distribution_id", 0)
+            if dist_id > self.current_distribution_id:
+                self.handle_distribution(dist_id)
+                continue
+
+            # Check for Training Trigger
             if not state.get("training_active"):
                 continue
+
+            # Ensure data loaders are ready before training
+            if self.train_loader is None or self.public_loader is None:
+                if self.private_data_dir.exists() and self.public_ref_dir.exists():
+                    try:
+                        print(f"[{self.client_id}] Initializing PyTorch DataLoaders from local directory...")
+                        self.train_loader, self.val_loader = get_client_dataloaders(str(self.private_data_dir), batch_size=32)
+                        self.public_loader = get_public_dataloader(str(self.public_ref_dir), batch_size=32)
+                    except Exception as e:
+                        print(f"[{self.client_id}] Error initializing DataLoaders: {e}")
+                        continue
+                else:
+                    print(f"[{self.client_id}] Training requested but dataset not distributed yet. Awaiting distribution...")
+                    time.sleep(1.0)
+                    continue
 
             current_round = state.get("current_round", 1)
             stage = state.get("stage", "idle")
@@ -152,16 +258,16 @@ class FedMDClient:
                 # 1. Train on private Non-IID data
                 print(f"[{self.client_id}] Training {local_epochs} local epochs on private Non-IID data...")
                 for ep in range(local_epochs):
-                    loss, acc = self.trainer.train_private_epoch(train_loader)
+                    loss, acc = self.trainer.train_private_epoch(self.train_loader)
                     print(f"[{self.client_id}] [Round {current_round} | Epoch {ep+1}/{local_epochs}] Private Loss: {loss:.4f} | Acc: {acc:.2f}%")
 
                 # 2. Evaluate on private val
-                val_loss, val_acc = self.trainer.evaluate(val_loader)
+                val_loss, val_acc = self.trainer.evaluate(self.val_loader)
                 print(f"[{self.client_id}] Validation Acc: {val_acc:.2f}% | Loss: {val_loss:.4f}")
 
                 # 3. Generate public logits on shared reference set
-                print(f"[{self.client_id}] Generating logits on {len(public_loader.dataset)} public reference images...")
-                logits = self.trainer.compute_public_logits(public_loader)
+                print(f"[{self.client_id}] Generating logits on {len(self.public_loader.dataset)} public reference images...")
+                logits = self.trainer.compute_public_logits(self.public_loader)
 
                 # 4. Upload logits to Master
                 print(f"[{self.client_id}] Uploading public logits to Master...")
@@ -184,7 +290,7 @@ class FedMDClient:
                     print(f"[{self.client_id}] Applying FedMD Knowledge Distillation (KL Divergence, tau={temperature})...")
                     
                     kd_loss = self.trainer.distill_from_consensus(
-                        public_loader=public_loader,
+                        public_loader=self.public_loader,
                         consensus_logits=consensus_logits,
                         temperature=temperature,
                         epochs=1,
