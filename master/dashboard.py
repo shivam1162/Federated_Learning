@@ -121,8 +121,38 @@ st.markdown("""
         border: 1px solid #FECACA;
         border-radius: 4px;
     }
+    /* Hover Info Tooltip Badge */
+    .info-tip {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background-color: #E2E8F0;
+        color: #475569;
+        font-size: 0.70rem;
+        font-weight: 700;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        cursor: help;
+        margin-left: 6px;
+        vertical-align: middle;
+        text-align: center;
+        line-height: 16px;
+        transition: background-color 0.15s ease-in-out, color 0.15s ease-in-out;
+    }
+    .info-tip:hover {
+        background-color: #0284C7;
+        color: #FFFFFF;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+
+def tip(text: str) -> str:
+    """Renders a clean hover tooltip icon (?) with explanatory text."""
+    clean = text.replace('"', '&quot;').replace("'", "&#39;")
+    return f'<span class="info-tip" title="{clean}">?</span>'
 
 
 def get_local_ip() -> str:
@@ -140,8 +170,12 @@ def get_local_ip() -> str:
 local_ip = get_local_ip()
 
 # Sidebar Navigation & Network Configuration
-st.sidebar.markdown("### Coordination Hub")
-master_url = st.sidebar.text_input("Coordinator API Endpoint", value=f"http://127.0.0.1:{DEFAULT_MASTER_PORT}")
+st.sidebar.markdown(f"### Coordination Hub {tip('Central orchestration server control panel and network connection details.')}", unsafe_allow_html=True)
+master_url = st.sidebar.text_input(
+    "Coordinator API Endpoint",
+    value=f"http://127.0.0.1:{DEFAULT_MASTER_PORT}",
+    help="Base HTTP URL of the FastAPI coordination hub running on this Master laptop."
+)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"""
@@ -173,24 +207,40 @@ def fetch_api(endpoint: str, method: str = "GET", data: Dict[str, Any] = None, t
 cluster_state = fetch_api("/api/status")
 
 # Header Section
-st.markdown('<div class="main-title">Heterogeneous Model Federated Learning (FedMD)</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Decentralized Knowledge Distillation across Disparate Neural Network Architectures on Physical Edge Hardware</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="main-title">Heterogeneous Model Federated Learning (FedMD) {tip("Decentralized, privacy-preserving federated learning allowing physically distinct edge devices with completely different neural network architectures to collaboratively learn without sharing weights or raw data.")}</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="sub-title">Decentralized Knowledge Distillation across Disparate Neural Network Architectures on Physical Edge Hardware {tip("Unlike FedAvg, which requires identical neural network weight dimensions, FedMD enables ResNet, MobileNet, and ShuffleNet to transfer knowledge by sharing soft output logits over an unlabelled public reference dataset.")}</div>', unsafe_allow_html=True)
 
 # Status Overview Banner
 col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 with col_s1:
     server_status = "ONLINE" if cluster_state else "OFFLINE"
-    st.metric("Coordinator Node", server_status)
+    st.metric(
+        "Coordinator Node",
+        server_status,
+        help="Operating status of the central Master coordinator hosting the FastAPI orchestration server (Port 8000) and this Streamlit dashboard."
+    )
 with col_s2:
     client_cnt = cluster_state.get("active_clients_count", 0) if cluster_state else 0
-    st.metric("Active Worker Nodes", f"{client_cnt} Devices")
+    st.metric(
+        "Active Worker Nodes",
+        f"{client_cnt} Devices",
+        help="Count of physical edge laptops actively connected over the local Wi-Fi and sending heartbeat signals within the last 45 seconds."
+    )
 with col_s3:
     current_rnd = cluster_state.get("current_round", 0) if cluster_state else 0
     tot_rnd = cluster_state.get("total_rounds", 0) if cluster_state else 0
-    st.metric("Communication Round", f"{current_rnd} / {tot_rnd}")
+    st.metric(
+        "Communication Round",
+        f"{current_rnd} / {tot_rnd}",
+        help="Current federated distillation round. In each round: local private training -> public logit submission -> ensemble consensus aggregation -> KL divergence distillation fine-tuning."
+    )
 with col_s4:
     is_training = cluster_state.get("training_active", False) if cluster_state else False
-    st.metric("Cluster State", "RUNNING" if is_training else "IDLE")
+    st.metric(
+        "Cluster State",
+        "RUNNING" if is_training else "IDLE",
+        help="Current operational status of the cluster. RUNNING indicates an active federated distillation round is executing across edge nodes; IDLE means the cluster is awaiting instructions."
+    )
 
 st.divider()
 
@@ -207,14 +257,14 @@ tab_cluster, tab_dataset, tab_training, tab_inference = st.tabs([
 # TAB 1: CLUSTER TOPOLOGY
 # ==============================================================================
 with tab_cluster:
-    st.markdown("#### Cluster Hardware Topology")
+    st.markdown(f"#### Cluster Hardware Topology {tip('Topology of physical edge laptops discovered and registered with this Coordinator over the local LAN / Wi-Fi.')}", unsafe_allow_html=True)
     st.write("Dynamic edge devices registered with this Coordinator over the local network.")
 
     # Master Node Card
     with st.container(border=True):
         col_m1, col_m2 = st.columns([1, 3])
         with col_m1:
-            st.markdown("##### Master Coordinator")
+            st.markdown(f"##### Master Coordinator {tip('The central orchestration node. Manages client registration, stages EuroSAT dataset packages, aggregates public reference logits into consensus, and renders dashboard telemetry. Zero model training load on this machine.')}", unsafe_allow_html=True)
             st.caption("Dedicated Central Hub")
             st.markdown('<span class="status-badge-active">COORDINATOR</span>', unsafe_allow_html=True)
         with col_m2:
@@ -224,7 +274,7 @@ with tab_cluster:
             - **Workload Allocation:** Lightweight Orchestration (0% Model Training)
             """)
 
-    st.markdown("##### Registered Worker Nodes")
+    st.markdown(f"##### Registered Worker Nodes {tip('Independent physical edge laptops participating in the federated training network. Each runs a local PyTorch training daemon with its own neural network architecture.')}", unsafe_allow_html=True)
     clients = cluster_state.get("clients", {}) if cluster_state else {}
 
     if not clients:
@@ -235,7 +285,10 @@ with tab_cluster:
             with st.container(border=True):
                 col1, col2, col3 = st.columns([1, 2, 1])
                 with col1:
-                    st.markdown(f"##### {cinfo.get('device_name', cid)}")
+                    m_arch = cinfo.get('model_name', 'Model')
+                    c_spec = cinfo.get('cpu_info', 'CPU')
+                    client_tip = tip(f"Worker node {cid} running architecture {m_arch} on {c_spec}")
+                    st.markdown(f"##### {cinfo.get('device_name', cid)} {client_tip}", unsafe_allow_html=True)
                     st.caption(f"Identifier: `{cid}`")
                 with col2:
                     st.markdown(f"""
@@ -254,12 +307,12 @@ with tab_cluster:
 # TAB 2: DATASET MANAGEMENT & DISTRIBUTION
 # ==============================================================================
 with tab_dataset:
-    st.markdown("#### EuroSAT Partitioning & Network Distribution")
+    st.markdown(f"#### EuroSAT Partitioning & Network Distribution {tip('Slices the Sentinel-2 64x64 satellite dataset into Non-IID partitions according to domain specializations and serves ZIP archives to worker nodes via HTTP.')}", unsafe_allow_html=True)
     st.write("Slices the Sentinel-2 64x64 satellite dataset into Non-IID partitions and serves ZIP bundles to worker clients via HTTP.")
 
     col_d1, col_d2 = st.columns([1, 2])
     with col_d1:
-        st.markdown("##### Partition Target")
+        st.markdown(f"##### Partition Target {tip('Number of distinct Non-IID client packages to generate. Automatically pre-filled with connected worker nodes, or allows manual pre-staging.')}", unsafe_allow_html=True)
         active_client_ids = list(clients.keys()) if clients else []
         default_count = max(len(active_client_ids), 2)
         
@@ -269,7 +322,7 @@ with tab_dataset:
             max_value=6,
             value=default_count,
             step=1,
-            help="Automatically detects registered edge laptops, or allows manual pre-staging."
+            help="Number of edge client partitions to slice and package. Each partition receives a distinct Non-IID class skew based on the 4-domain specialization matrix."
         )
 
         if active_client_ids:
@@ -282,7 +335,7 @@ with tab_dataset:
             "Dataset Allocation Mode",
             options=["Fast Demo Mode", "Full Dataset Mode"],
             index=0,
-            help="Fast Demo Mode uses a compact subset (~600-800 images/client) for rapid CPU training. Full Dataset Mode divides all 27,000 images across clients."
+            help="Fast Demo Mode uses a compact subset (300-2,000 images per node) for quick CPU training demonstrations (~20-30s per round). Full Dataset Mode partitions all 27,000 EuroSAT images equally across clients."
         )
 
         use_full = (dataset_mode == "Full Dataset Mode")
@@ -293,14 +346,14 @@ with tab_dataset:
                 max_value=2000,
                 value=600,
                 step=100,
-                help="Number of private images assigned to each edge client. Lower counts train faster on CPU."
+                help="Private dataset size assigned to each edge client in Fast Demo Mode. 600 samples trains in ~20-30 seconds per round on standard laptop CPUs."
             )
         else:
             est_per_node = 26100 // max(target_count, 1)
             st.info(f"Full Dataset Mode: All ~26,100 remaining images will be divided equally across the {target_count} clients (~{est_per_node:,} images per node). CPU training will take longer.")
             samples_per_client = est_per_node
 
-        if st.button("Generate Non-IID Partitions", use_container_width=True):
+        if st.button("Generate Non-IID Partitions", use_container_width=True, help="Slices the raw EuroSAT dataset and packages ZIP archives strictly in data/partitions/ on the Master laptop. Does not transmit data over the network."):
             if len(active_client_ids) >= target_count:
                 target_ids = active_client_ids[:target_count]
             else:
@@ -346,7 +399,7 @@ with tab_dataset:
                 err = res_init.get("error", "Failed to initiate partition task") if res_init else "Coordinator unreachable"
                 st.error(err)
 
-        if st.button("Distribute Dataset Packages", type="primary", use_container_width=True):
+        if st.button("Distribute Dataset Packages", type="primary", use_container_width=True, help="Broadcasts an explicit distribution signal to all registered edge nodes. Connected workers purge their previous local dataset, download the fresh ZIP over Wi-Fi, unpack it, and report ready with sample counts."):
             if not active_client_ids:
                 st.warning("No worker laptops are currently registered. Launch worker clients first before distributing.")
             else:
@@ -408,7 +461,7 @@ with tab_dataset:
                         st.warning("Distribution timed out or some worker nodes did not report ready. Check worker terminal logs.")
 
     with col_d2:
-        st.markdown("##### Non-IID Partitioning Rationale")
+        st.markdown(f"##### Non-IID Partitioning Rationale {tip('Non-IID (Non-Identically and Independently Distributed) data mirrors real-world edge scenarios where each device specializes in distinct geographical features.')}", unsafe_allow_html=True)
         st.markdown("""
         To rigorously validate **Federated Model Distillation (FedMD)** across disjoint domains:
         - **Worker 1 Partition**: Heavy bias towards **Agricultural & Vegetation** classes (`AnnualCrop`, `Forest`, `HerbaceousVegetation`, `Pasture`).
@@ -420,7 +473,7 @@ with tab_dataset:
     # Visualizing Partition Distribution
     history_data = fetch_api("/api/history")
     if history_data and history_data.get("stats"):
-        st.markdown("##### Client Class Distribution Breakdown")
+        st.markdown(f"##### Client Class Distribution Breakdown {tip('Visualizes the exact sample skew for each of the 10 EuroSAT classes across all worker partitions. Note the 80/20 domain density skew.')}", unsafe_allow_html=True)
         stats_df = pd.DataFrame(history_data["stats"]).fillna(0)
         
         # Professional clean bar chart
@@ -441,7 +494,7 @@ with tab_dataset:
     # Persistent Worker Node Dataset Staging Status
     dist_info = fetch_api("/api/distribution_state")
     if dist_info and dist_info.get("clients"):
-        st.markdown("##### Worker Node Dataset Staging Status")
+        st.markdown(f"##### Worker Node Dataset Staging Status {tip('Reports whether each connected worker node has successfully downloaded, unpacked, and loaded its dataset into PyTorch DataLoaders.')}", unsafe_allow_html=True)
         sync_rows = []
         for cid, cdata in dist_info["clients"].items():
             sync_rows.append({
@@ -459,17 +512,36 @@ with tab_dataset:
 # TAB 3: TRAINING CONTROL & LIVE TELEMETRY
 # ==============================================================================
 with tab_training:
-    st.markdown("#### Federated Distillation Control & Convergence Telemetry")
+    st.markdown(f"#### Federated Distillation Control & Convergence Telemetry {tip('Configure hyperparameters and execute federated distillation communication rounds across all registered heterogeneous edge devices.')}", unsafe_allow_html=True)
 
     col_c1, col_c2, col_c3 = st.columns(3)
     with col_c1:
-        num_rounds = st.slider("Communication Rounds", min_value=1, max_value=20, value=5)
+        num_rounds = st.slider(
+            "Communication Rounds",
+            min_value=1,
+            max_value=20,
+            value=5,
+            help="Total number of Federated Model Distillation rounds. In each round: local private training -> public logit submission -> ensemble consensus -> knowledge distillation."
+        )
     with col_c2:
-        local_epochs = st.slider("Local Epochs per Round", min_value=1, max_value=5, value=2)
+        local_epochs = st.slider(
+            "Local Epochs per Round",
+            min_value=1,
+            max_value=5,
+            value=2,
+            help="Number of local supervised training epochs run by each edge laptop on its private Non-IID partition using standard Cross-Entropy loss before generating public logits."
+        )
     with col_c3:
-        temperature = st.slider("Distillation Temperature (tau)", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
+        temperature = st.slider(
+            "Distillation Temperature (tau)",
+            min_value=1.0,
+            max_value=5.0,
+            value=2.0,
+            step=0.5,
+            help="Softens the softmax probability distribution during distillation. Higher temperatures reveal rich class inter-relationships ('dark knowledge') that standard hard labels miss."
+        )
 
-    if st.button("Start Federated Distillation", type="primary"):
+    if st.button("Start Federated Distillation", type="primary", help="Initiates Round 1 across all connected edge laptops. Workers begin local private training and report progress in real time."):
         dist_check = fetch_api("/api/distribution_state")
         if dist_check and not dist_check.get("all_ready", False) and dist_check.get("distribution_id", 0) == 0:
             st.warning("Datasets have not been distributed to worker nodes yet. Please distribute datasets in Tab 2 before starting training.")
@@ -488,7 +560,7 @@ with tab_training:
                     st.error("Failed to start training. Verify that worker clients are registered.")
 
     st.divider()
-    st.markdown("##### Real-Time Telemetry")
+    st.markdown(f"##### Real-Time Telemetry {tip('Tracks mathematical convergence metrics across communication rounds: Consensus Agreement Score and Local Model Validation Accuracy.')}", unsafe_allow_html=True)
 
     hist = history_data.get("history", []) if history_data else []
     if hist:
@@ -511,6 +583,7 @@ with tab_training:
                 margin=dict(l=20, r=20, t=40, b=20)
             )
             st.plotly_chart(fig_agree, use_container_width=True)
+            st.caption(f"Cosine similarity between public reference logits {tip('Cosine similarity measures the alignment between prediction logits across models. 1.0 represents complete agreement across disparate architectures.')}", unsafe_allow_html=True)
 
         with col_g2:
             acc_data = []
@@ -536,6 +609,7 @@ with tab_training:
                     margin=dict(l=20, r=20, t=40, b=20)
                 )
                 st.plotly_chart(fig_acc, use_container_width=True)
+                st.caption(f"Local validation accuracy on private validation partitions {tip('Evaluates individual client generalization on held-out private validation sets across successive distillation rounds.')}", unsafe_allow_html=True)
     else:
         st.info("Convergence telemetry will render dynamically as communication rounds proceed.")
 
@@ -544,13 +618,17 @@ with tab_training:
 # TAB 4: SATELLITE INFERENCE PLAYGROUND
 # ==============================================================================
 with tab_inference:
-    st.markdown("#### Satellite Image Classification Evaluation")
+    st.markdown(f"#### Satellite Image Classification Evaluation {tip('Evaluate inference on Sentinel-2 satellite imagery. Compare individual model predictions from specialized workers against the Common Knowledge Ensemble.')}", unsafe_allow_html=True)
     st.write("Compare individual predictions from each heterogeneous architecture against the **Common Knowledge Ensemble**.")
 
     col_p1, col_p2 = st.columns([1, 2])
     with col_p1:
-        st.markdown("##### Input Image Selection")
-        uploaded_file = st.file_uploader("Upload 64x64 Satellite Image", type=["jpg", "png", "jpeg"])
+        st.markdown(f"##### Input Image Selection {tip('Upload your own 64x64 RGB satellite image or pick a test sample from the EuroSAT evaluation pool.')}", unsafe_allow_html=True)
+        uploaded_file = st.file_uploader(
+            "Upload 64x64 Satellite Image",
+            type=["jpg", "png", "jpeg"],
+            help="Upload an unlabelled 64x64 pixel 3-channel (RGB) satellite image for multi-model inference."
+        )
 
         selected_image = None
         if uploaded_file:
@@ -558,7 +636,11 @@ with tab_inference:
         else:
             sample_files = list(PUBLIC_REF_DIR.glob("*.jpg")) + list(PUBLIC_REF_DIR.glob("*.png"))
             if sample_files:
-                sample_name = st.selectbox("Or select an evaluation sample", [f.name for f in sample_files[:10]])
+                sample_name = st.selectbox(
+                    "Or select an evaluation sample",
+                    [f.name for f in sample_files[:10]],
+                    help="Select a benchmark sample from the public reference distillation pool."
+                )
                 if sample_name:
                     selected_image = Image.open(PUBLIC_REF_DIR / sample_name).convert("RGB")
 
@@ -566,7 +648,7 @@ with tab_inference:
             st.image(selected_image, caption="EuroSAT Image (64x64 RGB)", width=220)
 
     with col_p2:
-        st.markdown("##### Model Inference Breakdown")
+        st.markdown(f"##### Model Inference Breakdown {tip('Demonstrates how individual models trained on skewed domains might disagree or have uncertainty, while the Common Knowledge Ensemble achieves high confidence through distillation consensus.')}", unsafe_allow_html=True)
         if selected_image:
             # Multi-model prediction breakdown
             model_evals = {
