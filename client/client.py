@@ -9,8 +9,9 @@ import zipfile
 import argparse
 import platform
 import shutil
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 import requests
 import torch
 
@@ -60,6 +61,68 @@ class FedMDClient:
         self.current_distribution_id = 0
         self.current_training_session_id = 0
         self.has_logged_finished = False
+
+        # Thread-safe telemetry state for background heartbeat daemon
+        self._telemetry_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self.telemetry: Dict[str, Any] = {
+            "sub_stage": "Connected",
+            "current_epoch": 0,
+            "total_epochs": 0,
+            "batch_progress": 0.0,
+            "step_loss": None,
+            "step_acc": None,
+        }
+
+    def set_telemetry(
+        self,
+        sub_stage: str,
+        current_epoch: int = 0,
+        total_epochs: int = 0,
+        batch_progress: float = 0.0,
+        step_loss: Optional[float] = None,
+        step_acc: Optional[float] = None,
+    ):
+        """Thread-safe update of local client telemetry."""
+        with self._telemetry_lock:
+            self.telemetry["sub_stage"] = sub_stage
+            self.telemetry["current_epoch"] = current_epoch
+            self.telemetry["total_epochs"] = total_epochs
+            self.telemetry["batch_progress"] = round(batch_progress, 3)
+            if step_loss is not None:
+                self.telemetry["step_loss"] = round(float(step_loss), 4)
+            if step_acc is not None:
+                self.telemetry["step_acc"] = round(float(step_acc), 2)
+
+    def start_heartbeat_daemon(self):
+        """Spawns dedicated background thread for unblocked heartbeats and live telemetry."""
+        if self._heartbeat_thread is None or not self._heartbeat_thread.is_alive():
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                daemon=True,
+                name=f"heartbeat-{self.client_id}"
+            )
+            self._heartbeat_thread.start()
+            print(f"[{self.client_id}] Dedicated background telemetry & heartbeat daemon started.")
+
+    def _heartbeat_loop(self):
+        """
+        Runs continuously in background, sending HTTP heartbeats + live telemetry
+        every 1.5 seconds without being blocked by PyTorch training on CPU.
+        """
+        while not self._stop_event.is_set():
+            try:
+                with self._telemetry_lock:
+                    payload = dict(self.telemetry)
+                requests.post(
+                    f"{self.master_url}/api/heartbeat/{self.client_id}",
+                    json=payload,
+                    timeout=3
+                )
+            except Exception:
+                pass
+            time.sleep(1.5)
 
     def reset_model_and_weights(self, session_id: int):
         """
@@ -121,6 +184,8 @@ class FedMDClient:
         print(f"[{self.client_id}] DISTRIBUTION SIGNAL RECEIVED (Batch ID: {distribution_id})")
         print(f"[{self.client_id}] ==================================================")
 
+        self.set_telemetry(sub_stage="Purging Local Dataset & Downloading Package", batch_progress=0.1)
+
         # 1. Report downloading status
         try:
             requests.post(
@@ -150,6 +215,7 @@ class FedMDClient:
         print(f"[{self.client_id}] Downloading partition package from Master: {self.master_url}/api/download_partition/{self.client_id}")
         zip_path = Path(f"{self.client_id}_temp.zip")
         try:
+            self.set_telemetry(sub_stage="Downloading Partition Package via LAN", batch_progress=0.3)
             res = requests.get(f"{self.master_url}/api/download_partition/{self.client_id}", stream=True, timeout=90)
             if res.status_code != 200:
                 err_msg = f"Download failed ({res.status_code}): {res.text}"
@@ -163,6 +229,7 @@ class FedMDClient:
                         f.write(chunk)
 
             # 4. Extract archive
+            self.set_telemetry(sub_stage="Extracting ZIP Archive", batch_progress=0.7)
             print(f"[{self.client_id}] Extracting partition archive into {self.base_dir}...")
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 zip_ref.extractall(self.base_dir)
@@ -171,6 +238,7 @@ class FedMDClient:
                 zip_path.unlink()
 
             # 5. Build and verify data loaders
+            self.set_telemetry(sub_stage="Initializing PyTorch DataLoaders", batch_progress=0.9)
             print(f"[{self.client_id}] Initializing PyTorch DataLoaders...")
             self.train_loader, self.val_loader = get_client_dataloaders(str(self.private_data_dir), batch_size=32)
             self.public_loader = get_public_dataloader(str(self.public_ref_dir), batch_size=32)
@@ -196,6 +264,7 @@ class FedMDClient:
                 },
                 timeout=5,
             )
+            self.set_telemetry(sub_stage="Dataset Partition Ready", batch_progress=1.0)
             print(f"[{self.client_id}] Distribution confirmed [READY] to Master.")
             return True
 
@@ -207,6 +276,7 @@ class FedMDClient:
                     zip_path.unlink()
                 except Exception:
                     pass
+            self.set_telemetry(sub_stage=f"Error: {err_msg}")
             self._report_distribution_error(distribution_id, err_msg)
             return False
 
@@ -225,23 +295,16 @@ class FedMDClient:
         except Exception:
             pass
 
-    def send_heartbeat(self):
-        """Sends lightweight presence update."""
-        try:
-            requests.post(f"{self.master_url}/api/heartbeat/{self.client_id}", timeout=2)
-        except Exception:
-            pass
-
     def run_training_cycle(self):
         """
         Main worker daemon loop: listens for Master round states, executes local CE training,
         uploads reference logits, and distills from ensemble consensus.
         """
         print(f"[{self.client_id}] Worker daemon active. Waiting for dataset distribution and training rounds...")
-        
+        self.set_telemetry(sub_stage="Connected & Idle")
+
         while True:
-            time.sleep(1.5)
-            self.send_heartbeat()
+            time.sleep(1.0)
 
             try:
                 res = requests.get(f"{self.master_url}/api/round_state", timeout=3)
@@ -278,6 +341,7 @@ class FedMDClient:
                         print(f"[{self.client_id}] Error initializing DataLoaders: {e}")
                         continue
                 else:
+                    self.set_telemetry(sub_stage="Awaiting Dataset Distribution")
                     print(f"[{self.client_id}] Training requested but dataset not distributed yet. Awaiting distribution...")
                     time.sleep(1.0)
                     continue
@@ -290,22 +354,36 @@ class FedMDClient:
             # Stage 1: Private local training + Public logit submission
             if current_round > self.last_completed_round and stage == "waiting_for_logits":
                 print(f"\n[{self.client_id}] === STARTING ROUND {current_round}/{state.get('total_rounds')} ===")
-                
-                # 1. Train on private Non-IID data
+
+                # 1. Train on private Non-IID data with live batch callback
                 print(f"[{self.client_id}] Training {local_epochs} local epochs on private Non-IID data...")
                 for ep in range(local_epochs):
-                    loss, acc = self.trainer.train_private_epoch(self.train_loader)
+                    def on_batch(b_idx, total_b, b_loss, b_acc):
+                        pct = b_idx / max(total_b, 1)
+                        self.set_telemetry(
+                            sub_stage=f"Round {current_round} | Epoch {ep+1}/{local_epochs} ({int(pct*100)}%)",
+                            current_epoch=ep+1,
+                            total_epochs=local_epochs,
+                            batch_progress=pct,
+                            step_loss=b_loss,
+                            step_acc=b_acc
+                        )
+
+                    loss, acc = self.trainer.train_private_epoch(self.train_loader, batch_callback=on_batch)
                     print(f"[{self.client_id}] [Round {current_round} | Epoch {ep+1}/{local_epochs}] Private Loss: {loss:.4f} | Acc: {acc:.2f}%")
 
                 # 2. Evaluate on private val
+                self.set_telemetry(sub_stage=f"Round {current_round} | Evaluating Private Validation")
                 val_loss, val_acc = self.trainer.evaluate(self.val_loader)
                 print(f"[{self.client_id}] Validation Acc: {val_acc:.2f}% | Loss: {val_loss:.4f}")
 
                 # 3. Generate public logits on shared reference set
+                self.set_telemetry(sub_stage=f"Round {current_round} | Computing Public Logits")
                 print(f"[{self.client_id}] Generating logits on {len(self.public_loader.dataset)} public reference images...")
                 logits = self.trainer.compute_public_logits(self.public_loader)
 
                 # 4. Upload logits to Master
+                self.set_telemetry(sub_stage=f"Round {current_round} | Uploading Public Logits")
                 print(f"[{self.client_id}] Uploading public logits to Master...")
                 submit_payload = {
                     "client_id": self.client_id,
@@ -315,21 +393,32 @@ class FedMDClient:
                     "local_acc": float(val_acc),
                 }
                 res_sub = requests.post(f"{self.master_url}/api/submit_logits", json=submit_payload, timeout=10)
+                self.set_telemetry(sub_stage=f"Round {current_round} | Awaiting Ensemble Consensus")
                 print(f"[{self.client_id}] Logits submitted successfully. Waiting for ensemble consensus...")
 
             # Stage 2: Distill from ensemble consensus
             elif current_round > self.last_completed_round and stage == "consensus_ready":
+                self.set_telemetry(sub_stage=f"Round {current_round} | Fetching Consensus Logits")
                 print(f"[{self.client_id}] Fetching consensus logits for Round {current_round} from Master...")
                 res_cons = requests.get(f"{self.master_url}/api/get_consensus/{current_round}", timeout=5)
                 if res_cons.status_code == 200 and res_cons.json().get("ready"):
                     consensus_logits = res_cons.json()["consensus_logits"]
                     print(f"[{self.client_id}] Applying FedMD Knowledge Distillation (KL Divergence, tau={temperature})...")
-                    
+
+                    def on_kd_batch(b_idx, total_b, kd_l):
+                        pct = b_idx / max(total_b, 1)
+                        self.set_telemetry(
+                            sub_stage=f"Round {current_round} | FedMD Distillation ({int(pct*100)}%)",
+                            batch_progress=pct,
+                            step_loss=kd_l
+                        )
+
                     kd_loss = self.trainer.distill_from_consensus(
                         public_loader=self.public_loader,
                         consensus_logits=consensus_logits,
                         temperature=temperature,
                         epochs=1,
+                        batch_callback=on_kd_batch
                     )
                     print(f"[{self.client_id}] Knowledge Distillation complete! KD Loss: {kd_loss:.4f}")
 
@@ -340,10 +429,12 @@ class FedMDClient:
                     # Notify Master
                     requests.post(f"{self.master_url}/api/complete_round/{self.client_id}?round_num={current_round}", timeout=5)
                     self.last_completed_round = current_round
+                    self.set_telemetry(sub_stage=f"Round {current_round} Complete (Awaiting Next Round)")
                     print(f"[{self.client_id}] Round {current_round} completed.")
 
             elif stage == "finished" and self.last_completed_round > 0:
                 if not self.has_logged_finished:
+                    self.set_telemetry(sub_stage="Training Complete (Ready for Inference)")
                     print(f"[{self.client_id}] Federated learning completed successfully! Ready for inference or next training run.")
                     self.has_logged_finished = True
                 continue
@@ -370,6 +461,9 @@ def main():
     if not client.register():
         print("Registration failed. Please make sure the Master server is running.")
         sys.exit(1)
+
+    # Launch dedicated background heartbeat & live telemetry thread
+    client.start_heartbeat_daemon()
 
     try:
         client.run_training_cycle()

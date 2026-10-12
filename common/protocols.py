@@ -19,6 +19,15 @@ class ClientRegistrationResponse(BaseModel):
     assigned_partition: str
 
 
+class HeartbeatPayload(BaseModel):
+    sub_stage: Optional[str] = "Idle"
+    current_epoch: Optional[int] = 0
+    total_epochs: Optional[int] = 0
+    batch_progress: Optional[float] = 0.0
+    step_loss: Optional[float] = None
+    step_acc: Optional[float] = None
+
+
 class ClientStatus(BaseModel):
     client_id: str
     device_name: str
@@ -29,6 +38,12 @@ class ClientStatus(BaseModel):
     current_round: int = 0
     is_training: bool = False
     metrics: Dict[str, float] = Field(default_factory=dict)
+    sub_stage: Optional[str] = "Idle"
+    current_epoch: Optional[int] = 0
+    total_epochs: Optional[int] = 0
+    batch_progress: Optional[float] = 0.0
+    step_loss: Optional[float] = None
+    step_acc: Optional[float] = None
 
 
 class ClusterStatusResponse(BaseModel):

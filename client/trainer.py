@@ -1,7 +1,7 @@
 """
 Local Trainer implementing Cross-Entropy private training and FedMD KL-divergence distillation.
 """
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional, Callable
 import numpy as np
 import torch
 import torch.nn as nn
@@ -26,7 +26,11 @@ class LocalTrainer:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-4)
         self.ce_criterion = nn.CrossEntropyLoss()
 
-    def train_private_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
+    def train_private_epoch(
+        self,
+        train_loader: DataLoader,
+        batch_callback: Optional[Callable[[int, int, float, float], None]] = None
+    ) -> Tuple[float, float]:
         """
         Executes one epoch of supervised training on private Non-IID data.
         Returns: (average_loss, accuracy_percentage)
@@ -35,8 +39,9 @@ class LocalTrainer:
         total_loss = 0.0
         correct = 0
         total = 0
+        num_batches = len(train_loader)
 
-        for images, targets in train_loader:
+        for batch_idx, (images, targets) in enumerate(train_loader):
             images = images.to(self.device)
             targets = targets.to(self.device)
 
@@ -46,10 +51,15 @@ class LocalTrainer:
             loss.backward()
             self.optimizer.step()
 
-            total_loss += loss.item() * images.size(0)
+            batch_loss = loss.item()
+            total_loss += batch_loss * images.size(0)
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
+
+            if batch_callback and (batch_idx % 2 == 0 or batch_idx == num_batches - 1):
+                cur_acc = (correct / max(total, 1)) * 100.0
+                batch_callback(batch_idx + 1, num_batches, batch_loss, cur_acc)
 
         avg_loss = total_loss / max(total, 1)
         acc = (correct / max(total, 1)) * 100.0
@@ -107,7 +117,8 @@ class LocalTrainer:
         public_loader: DataLoader,
         consensus_logits: List[List[float]],
         temperature: float = DEFAULT_TEMPERATURE,
-        epochs: int = 1
+        epochs: int = 1,
+        batch_callback: Optional[Callable[[int, int, float], None]] = None
     ) -> float:
         """
         Fine-tunes model on public reference data to mimic ensemble consensus logits
@@ -118,10 +129,11 @@ class LocalTrainer:
 
         total_kd_loss = 0.0
         step_count = 0
+        num_batches = len(public_loader)
 
         for _ in range(epochs):
             offset = 0
-            for images, _ in public_loader:
+            for batch_idx, (images, _) in enumerate(public_loader):
                 batch_size = images.size(0)
                 images = images.to(self.device)
                 target_logits = consensus_tensor[offset : offset + batch_size].to(self.device)
@@ -139,8 +151,12 @@ class LocalTrainer:
                 kd_loss.backward()
                 self.optimizer.step()
 
-                total_kd_loss += kd_loss.item()
+                batch_kd = kd_loss.item()
+                total_kd_loss += batch_kd
                 step_count += 1
+
+                if batch_callback and (batch_idx % 2 == 0 or batch_idx == num_batches - 1):
+                    batch_callback(batch_idx + 1, num_batches, batch_kd)
 
         return total_kd_loss / max(step_count, 1)
 

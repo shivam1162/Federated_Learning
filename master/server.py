@@ -29,6 +29,7 @@ from common.protocols import (
     ConsensusResponse,
     RoundMetrics,
     DistributionStatusReport,
+    HeartbeatPayload,
 )
 from master.partitioner import partition_dataset_non_iid, download_eurosat
 
@@ -133,10 +134,24 @@ def register_client(req: ClientRegistrationRequest, request: Request):
 
 
 @app.post("/api/heartbeat/{client_id}")
-def heartbeat(client_id: str):
-    """Updates client presence timestamp."""
+def heartbeat(client_id: str, payload: Optional[HeartbeatPayload] = None):
+    """Updates client presence timestamp and records live telemetry state."""
     if client_id in state.clients:
-        state.clients[client_id].last_seen = time.time()
+        client = state.clients[client_id]
+        client.last_seen = time.time()
+        if payload:
+            if payload.sub_stage is not None:
+                client.sub_stage = payload.sub_stage
+            if payload.current_epoch is not None:
+                client.current_epoch = payload.current_epoch
+            if payload.total_epochs is not None:
+                client.total_epochs = payload.total_epochs
+            if payload.batch_progress is not None:
+                client.batch_progress = payload.batch_progress
+            if payload.step_loss is not None:
+                client.step_loss = payload.step_loss
+            if payload.step_acc is not None:
+                client.step_acc = payload.step_acc
         return {"status": "ok"}
     raise HTTPException(status_code=404, detail="Client not registered")
 

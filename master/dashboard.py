@@ -291,16 +291,23 @@ with tab_cluster:
                     st.markdown(f"##### {cinfo.get('device_name', cid)} {client_tip}", unsafe_allow_html=True)
                     st.caption(f"Identifier: `{cid}`")
                 with col2:
+                    sub_stage = cinfo.get("sub_stage", "Connected & Idle")
                     st.markdown(f"""
                     - **Architecture:** `{cinfo.get('model_name', 'Unknown')}`
                     - **Processor:** `{cinfo.get('cpu_info', 'Standard CPU')}`
-                    - **Network Origin:** `{cinfo.get('ip_address', 'Local')}`
-                    """)
+                    - **Live Phase:** <span class="status-badge-info">{sub_stage}</span>
+                    """, unsafe_allow_html=True)
+                    prog = float(cinfo.get("batch_progress", 0.0) or 0.0)
+                    if prog > 0.0:
+                        st.progress(min(max(prog, 0.0), 1.0))
                 with col3:
                     is_active = (pd.Timestamp.now().timestamp() - cinfo.get("last_seen", 0)) < 45.0
                     badge = '<span class="status-badge-active">ACTIVE</span>' if is_active else '<span class="status-badge-idle">DISCONNECTED</span>'
                     st.markdown(badge, unsafe_allow_html=True)
                     st.caption(f"Round Progress: {cinfo.get('current_round', 0)}")
+                    s_loss = cinfo.get("step_loss")
+                    if s_loss is not None:
+                        st.caption(f"Step Loss: `{s_loss:.4f}`")
 
 
 # ==============================================================================
@@ -557,8 +564,39 @@ with tab_training:
                 if res and res.get("status") == "started":
                     session_id = res.get("session_id", 1)
                     st.success(f"Distillation session {session_id} initiated for {num_rounds} communication rounds. Older checkpoint weights purged on worker nodes.")
+                    time.sleep(0.5)
+                    st.rerun()
                 else:
                     st.error("Failed to start training. Verify that worker clients are registered.")
+
+    # Live Worker Execution Telemetry
+    if is_training:
+        st.markdown(f"##### Live Worker Execution Telemetry {tip('Real-time execution status, batch progress, and loss reported by edge worker background daemons.')}", unsafe_allow_html=True)
+        for cid, cinfo in clients.items():
+            with st.container(border=True):
+                col_w1, col_w2, col_w3 = st.columns([1, 2, 1])
+                with col_w1:
+                    st.markdown(f"**{cinfo.get('device_name', cid)}**")
+                    st.caption(f"Arch: `{cinfo.get('model_name', 'Model')}` | Round {cinfo.get('current_round', current_rnd)}/{tot_rnd}")
+                with col_w2:
+                    sub_stage = cinfo.get("sub_stage", "Executing...")
+                    st.markdown(f'<span class="status-badge-info">{sub_stage}</span>', unsafe_allow_html=True)
+                    prog = float(cinfo.get("batch_progress", 0.0) or 0.0)
+                    st.progress(min(max(prog, 0.0), 1.0))
+                with col_w3:
+                    s_loss = cinfo.get("step_loss")
+                    s_acc = cinfo.get("step_acc")
+                    if s_loss is not None:
+                        st.metric("Batch Loss", f"{s_loss:.4f}")
+                    if s_acc is not None:
+                        st.caption(f"Batch Acc: {s_acc:.1f}%")
+
+        col_ref1, col_ref2 = st.columns([3, 1])
+        with col_ref1:
+            auto_refresh = st.checkbox("Live Auto-Refresh Telemetry (every 2s)", value=True, help="Automatically refreshes dashboard every 2 seconds to stream real-time worker telemetry.")
+        with col_ref2:
+            if st.button("Refresh Telemetry Now", use_container_width=True):
+                st.rerun()
 
     st.divider()
     st.markdown(f"##### Real-Time Telemetry {tip('Tracks mathematical convergence metrics across communication rounds: Consensus Agreement Score and Local Model Validation Accuracy.')}", unsafe_allow_html=True)
@@ -613,6 +651,10 @@ with tab_training:
                 st.caption(f"Local validation accuracy on private validation partitions {tip('Evaluates individual client generalization on held-out private validation sets across successive distillation rounds.')}", unsafe_allow_html=True)
     else:
         st.info("Convergence telemetry will render dynamically as communication rounds proceed.")
+
+    if is_training and locals().get("auto_refresh", True):
+        time.sleep(2.0)
+        st.rerun()
 
 
 # ==============================================================================
