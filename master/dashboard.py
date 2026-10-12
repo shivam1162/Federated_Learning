@@ -742,8 +742,8 @@ with tab_inference:
 
             # 2. Determine target models from registered cluster or fallback reference
             eval_nodes = {}
-            if cluster_data and cluster_data.get("clients"):
-                for cid, cinfo in cluster_data["clients"].items():
+            if cluster_state and not cluster_state.get("error") and cluster_state.get("clients"):
+                for cid, cinfo in cluster_state["clients"].items():
                     eval_nodes[cid] = {
                         "model_name": cinfo.get("model_name", "resnet18"),
                         "device_name": cinfo.get("device_name", cid),
