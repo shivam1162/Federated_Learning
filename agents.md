@@ -203,6 +203,9 @@ The web dashboard (`master/dashboard.py`) follows an enterprise, professional de
    * Real-time Plotly charts:
      * Local validation accuracy progression per client.
      * Consensus agreement score (cosine similarity of logits across disparate models over rounds).
+   * **Executive Evaluation Report (PDF)**:
+     * Generates an enterprise-grade PDF report summarizing all training parameters, hardware topologies, Non-IID class distribution tables, and multi-panel high-resolution convergence curves.
+     * Downloadable with one click directly from Streamlit via `st.download_button` or via `GET /api/download_report`.
 4. **Interactive Satellite Inference Playground Tab**:
    * Drag-and-drop custom 64x64 satellite tiles or filter benchmark samples across all 10 EuroSAT land cover classes.
    * Ground truth detection and verification badge (`[CORRECT MATCH]` vs `[MISMATCH]`).
@@ -236,6 +239,7 @@ federated_learning/
 │   ├── __init__.py
 │   ├── server.py                # FastAPI coordination server (registration, sync, logits, data staging)
 │   ├── partitioner.py           # EuroSAT Non-IID dataset slicer and packager with progress callback
+│   ├── report_generator.py      # Automated executive PDF report builder with embedded charts
 │   └── dashboard.py             # Streamlit visual control center & inference demo
 │
 ├── client/                      # Runs on Worker Laptops

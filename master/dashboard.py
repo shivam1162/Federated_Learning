@@ -31,6 +31,7 @@ from common.config import (
 )
 from client.models import get_model, get_model_summary
 from client.dataset import EVAL_TRANSFORM
+from master.report_generator import build_training_pdf_report
 
 # Professional Page configuration (Zero emojis)
 st.set_page_config(
@@ -653,6 +654,40 @@ with tab_training:
                 )
                 st.plotly_chart(fig_acc, use_container_width=True)
                 st.caption(f"Local validation accuracy on private validation partitions {tip('Evaluates individual client generalization on held-out private validation sets across successive distillation rounds.')}", unsafe_allow_html=True)
+
+        # Executive Training Evaluation PDF Report Download
+        st.divider()
+        st.markdown(f"##### Executive Training Evaluation Report {tip('Generate and download an enterprise PDF report summarizing all training parameters, hardware topologies, convergence graphs, and consensus benchmarks.')}", unsafe_allow_html=True)
+        col_rep1, col_rep2 = st.columns([2, 1])
+        with col_rep1:
+            st.write("Generate a publication-grade PDF report containing complete round telemetry, model parameter counts, Non-IID class distribution tables, and high-resolution convergence curves.")
+        with col_rep2:
+            session_id = cluster_state.get("training_session_id", 1) if (cluster_state and not cluster_state.get("error")) else 1
+            hyperparams = {
+                "total_rounds": cluster_state.get("total_rounds", len(hist)) if (cluster_state and not cluster_state.get("error")) else len(hist),
+                "local_epochs": 2,
+                "batch_size": 32,
+                "temperature": 2.0,
+            }
+            try:
+                pdf_report_bytes = build_training_pdf_report(
+                    session_id=session_id,
+                    cluster_state=cluster_state or {},
+                    history=hist,
+                    partition_stats=history_data.get("stats", {}) if history_data else {},
+                    hyperparams=hyperparams,
+                    output_path=f"reports/fedmd_training_report_session_{session_id}.pdf"
+                )
+                st.download_button(
+                    label="Download Evaluation Report (PDF)",
+                    data=pdf_report_bytes,
+                    file_name=f"fedmd_training_report_session_{session_id}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    help="Download full comprehensive PDF report with graphs, metrics, and hardware specifications."
+                )
+            except Exception as e:
+                st.caption(f"Report generation note: {e}")
     else:
         st.info("Convergence telemetry will render dynamically as communication rounds proceed.")
 

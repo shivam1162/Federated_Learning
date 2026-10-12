@@ -537,6 +537,29 @@ def complete_round(client_id: str, round_num: int):
         if round_num >= state.total_rounds:
             state.training_active = False
             state.stage = "finished"
+            # Auto-generate detailed PDF evaluation report
+            try:
+                from master.report_generator import build_training_pdf_report
+                report_path = f"reports/fedmd_training_report_session_{state.training_session_id}.pdf"
+                build_training_pdf_report(
+                    session_id=state.training_session_id,
+                    cluster_state={
+                        "master_status": "Online",
+                        "clients": {cid: c.model_dump() for cid, c in state.clients.items()},
+                    },
+                    history=[m.model_dump() for m in state.history],
+                    partition_stats=state.partition_stats,
+                    hyperparams={
+                        "total_rounds": state.total_rounds,
+                        "local_epochs": state.local_epochs,
+                        "batch_size": state.batch_size,
+                        "temperature": state.temperature,
+                    },
+                    output_path=report_path,
+                )
+                print(f"[Master] Training completed. Automated PDF report saved to {report_path}")
+            except Exception as e:
+                print(f"[Master] Warning generating auto report: {e}")
         else:
             state.current_round = round_num + 1
             state.stage = "waiting_for_logits"
@@ -592,4 +615,35 @@ def get_weights_status():
                         "mtime": latest.stat().st_mtime,
                     }
     return result
+
+
+@app.get("/api/download_report")
+@app.get("/api/download_report/{session_id}")
+def download_training_report(session_id: Optional[int] = None):
+    """
+    Serves the generated training evaluation PDF report for session_id or latest completed session.
+    """
+    reports_dir = Path("reports")
+    if not reports_dir.exists():
+        raise HTTPException(status_code=404, detail="No evaluation reports found. Run a federated distillation session first.")
+
+    target_file = None
+    if session_id:
+        candidate = reports_dir / f"fedmd_training_report_session_{session_id}.pdf"
+        if candidate.exists():
+            target_file = candidate
+
+    if not target_file:
+        available = sorted(reports_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if available:
+            target_file = available[0]
+        else:
+            raise HTTPException(status_code=404, detail="No PDF report available yet. Complete training to generate.")
+
+    return FileResponse(
+        path=target_file,
+        media_type="application/pdf",
+        filename=target_file.name,
+    )
+
 
