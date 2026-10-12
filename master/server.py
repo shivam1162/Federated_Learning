@@ -73,6 +73,8 @@ class MasterState:
         self.distribution_id: int = 0
         self.distribution_active: bool = False
         self.distribution_status: Dict[str, Dict[str, Any]] = {}
+        # Training session tracking (increments on each Start Federated Distillation trigger)
+        self.training_session_id: int = 0
 
 state = MasterState()
 
@@ -374,6 +376,7 @@ def start_training(req: StartTrainingRequest):
     if len(state.clients) == 0:
         raise HTTPException(status_code=400, detail="Cannot start: No clients registered yet.")
 
+    state.training_session_id += 1
     state.total_rounds = req.total_rounds
     state.local_epochs = req.local_epochs
     state.batch_size = req.batch_size
@@ -390,7 +393,12 @@ def start_training(req: StartTrainingRequest):
         c.is_training = True
         c.current_round = 1
 
-    return {"status": "started", "round": 1, "total_rounds": state.total_rounds}
+    return {
+        "status": "started",
+        "session_id": state.training_session_id,
+        "round": 1,
+        "total_rounds": state.total_rounds,
+    }
 
 
 @app.get("/api/round_state")
@@ -398,6 +406,7 @@ def get_round_state():
     """Returns training parameters and synchronization signals for worker clients."""
     return {
         "training_active": state.training_active,
+        "training_session_id": state.training_session_id,
         "current_round": state.current_round,
         "total_rounds": state.total_rounds,
         "stage": state.stage,

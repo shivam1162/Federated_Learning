@@ -541,7 +541,7 @@ with tab_training:
             help="Softens the softmax probability distribution during distillation. Higher temperatures reveal rich class inter-relationships ('dark knowledge') that standard hard labels miss."
         )
 
-    if st.button("Start Federated Distillation", type="primary", help="Initiates Round 1 across all connected edge laptops. Workers begin local private training and report progress in real time."):
+    if st.button("Start Federated Distillation", type="primary", help="Initiates a new federated distillation session across all edge laptops. Workers automatically purge previous checkpoint weights, reinitialize models to baseline, and begin Round 1 training."):
         dist_check = fetch_api("/api/distribution_state")
         if dist_check and not dist_check.get("all_ready", False) and dist_check.get("distribution_id", 0) == 0:
             st.warning("Datasets have not been distributed to worker nodes yet. Please distribute datasets in Tab 2 before starting training.")
@@ -555,7 +555,8 @@ with tab_training:
                     "alpha": 0.5,
                 })
                 if res and res.get("status") == "started":
-                    st.success(f"Distillation cycle initiated for {num_rounds} communication rounds.")
+                    session_id = res.get("session_id", 1)
+                    st.success(f"Distillation session {session_id} initiated for {num_rounds} communication rounds. Older checkpoint weights purged on worker nodes.")
                 else:
                     st.error("Failed to start training. Verify that worker clients are registered.")
 

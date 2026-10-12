@@ -58,6 +58,36 @@ class FedMDClient:
         self.val_loader = None
         self.public_loader = None
         self.current_distribution_id = 0
+        self.current_training_session_id = 0
+        self.has_logged_finished = False
+
+    def reset_model_and_weights(self, session_id: int):
+        """
+        Purges older saved checkpoints from disk and reinitializes the neural network
+        model to fresh initial weights for a new training session.
+        """
+        print(f"\n[{self.client_id}] ==================================================")
+        print(f"[{self.client_id}] NEW TRAINING SESSION (ID: {session_id}) DETECTED")
+        print(f"[{self.client_id}] PURGING OLDER WEIGHTS & RE-INITIALIZING MODEL")
+        print(f"[{self.client_id}] ==================================================")
+
+        # 1. Purge checkpoint directory
+        purged_count = 0
+        if self.weights_dir.exists():
+            for pt_file in self.weights_dir.glob("*.pt"):
+                try:
+                    pt_file.unlink(missing_ok=True)
+                    purged_count += 1
+                except Exception as e:
+                    print(f"[{self.client_id}] Warning deleting checkpoint {pt_file.name}: {e}")
+        print(f"[{self.client_id}] Purged {purged_count} previous checkpoint file(s) from {self.weights_dir}")
+
+        # 2. Re-initialize model architecture to clean baseline state
+        self.model = get_model(self.model_name, num_classes=len(EUROSAT_CLASSES))
+        self.trainer = LocalTrainer(self.model, device=self.device)
+        self.last_completed_round = 0
+        self.has_logged_finished = False
+        print(f"[{self.client_id}] Model architecture '{self.model_name}' re-initialized to initial baseline state.")
 
     def register(self) -> bool:
         """Sends registration handshake to Master coordinator."""
@@ -231,6 +261,12 @@ class FedMDClient:
             if not state.get("training_active"):
                 continue
 
+            # Check for New Training Session Trigger (Purges older weights & resets model)
+            session_id = state.get("training_session_id", 0)
+            if session_id > self.current_training_session_id:
+                self.reset_model_and_weights(session_id)
+                self.current_training_session_id = session_id
+
             # Ensure data loaders are ready before training
             if self.train_loader is None or self.public_loader is None:
                 if self.private_data_dir.exists() and self.public_ref_dir.exists():
@@ -307,8 +343,10 @@ class FedMDClient:
                     print(f"[{self.client_id}] Round {current_round} completed.")
 
             elif stage == "finished" and self.last_completed_round > 0:
-                print(f"[{self.client_id}] Federated learning completed successfully! Ready for inference.")
-                break
+                if not self.has_logged_finished:
+                    print(f"[{self.client_id}] Federated learning completed successfully! Ready for inference or next training run.")
+                    self.has_logged_finished = True
+                continue
 
 
 def main():
