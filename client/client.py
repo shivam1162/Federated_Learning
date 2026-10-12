@@ -425,6 +425,19 @@ class FedMDClient:
                     # Save weights
                     ckpt_path = self.weights_dir / f"model_round_{current_round}.pt"
                     self.trainer.save_checkpoint(str(ckpt_path))
+                    latest_ckpt = self.weights_dir / "latest.pt"
+                    self.trainer.save_checkpoint(str(latest_ckpt))
+
+                    # Upload checkpoint to Master for centralized evaluation in Tab 4
+                    try:
+                        with open(latest_ckpt, "rb") as f_up:
+                            requests.post(
+                                f"{self.master_url}/api/upload_weights/{self.client_id}",
+                                files={"file": (f"{self.client_id}_latest.pt", f_up, "application/octet-stream")},
+                                timeout=20
+                            )
+                    except Exception as e:
+                        print(f"[{self.client_id}] Note: Could not upload checkpoint to Master: {e}")
 
                     # Notify Master
                     requests.post(f"{self.master_url}/api/complete_round/{self.client_id}?round_num={current_round}", timeout=5)

@@ -15,6 +15,8 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from PIL import Image
+import torch
+import torch.nn.functional as F
 
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -27,6 +29,8 @@ from common.config import (
     PUBLIC_REF_DIR,
     PARTITIONS_DIR,
 )
+from client.models import get_model, get_model_summary
+from client.dataset import EVAL_TRANSFORM
 
 # Professional Page configuration (Zero emojis)
 st.set_page_config(
@@ -661,12 +665,12 @@ with tab_training:
 # TAB 4: SATELLITE INFERENCE PLAYGROUND
 # ==============================================================================
 with tab_inference:
-    st.markdown(f"#### Satellite Image Classification Evaluation {tip('Evaluate inference on Sentinel-2 satellite imagery. Compare individual model predictions from specialized workers against the Common Knowledge Ensemble.')}", unsafe_allow_html=True)
-    st.write("Compare individual predictions from each heterogeneous architecture against the **Common Knowledge Ensemble**.")
+    st.markdown(f"#### Satellite Image Classification Evaluation {tip('Evaluate live PyTorch inference on Sentinel-2 satellite imagery. Compare individual model predictions from specialized workers against the Common Knowledge Ensemble.')}", unsafe_allow_html=True)
+    st.write("Evaluate live PyTorch model inference on Sentinel-2 satellite imagery. Compare individual predictions from each heterogeneous architecture against the **Common Knowledge Ensemble**.")
 
     col_p1, col_p2 = st.columns([1, 2])
     with col_p1:
-        st.markdown(f"##### Input Image Selection {tip('Upload your own 64x64 RGB satellite image or pick a test sample from the EuroSAT evaluation pool.')}", unsafe_allow_html=True)
+        st.markdown(f"##### Input Image Selection {tip('Upload your own 64x64 RGB satellite image or pick a benchmark sample from the EuroSAT evaluation pool.')}", unsafe_allow_html=True)
         uploaded_file = st.file_uploader(
             "Upload 64x64 Satellite Image",
             type=["jpg", "png", "jpeg"],
@@ -674,37 +678,245 @@ with tab_inference:
         )
 
         selected_image = None
+        sample_name = None
+        ground_truth_label = None
+
         if uploaded_file:
-            selected_image = Image.open(uploaded_file).convert("RGB")
+            try:
+                selected_image = Image.open(uploaded_file).convert("RGB")
+                sample_name = uploaded_file.name
+            except Exception as e:
+                st.error(f"Error loading image: {e}")
         else:
-            sample_files = list(PUBLIC_REF_DIR.glob("*.jpg")) + list(PUBLIC_REF_DIR.glob("*.png"))
-            if sample_files:
-                sample_name = st.selectbox(
-                    "Or select an evaluation sample",
-                    [f.name for f in sample_files[:10]],
-                    help="Select a benchmark sample from the public reference distillation pool."
+            # Multi-class sample selection from public reference set
+            if PUBLIC_REF_DIR.exists():
+                all_samples = sorted(list(PUBLIC_REF_DIR.glob("*.jpg")) + list(PUBLIC_REF_DIR.glob("*.png")))
+            else:
+                all_samples = []
+
+            if all_samples:
+                # Class filter
+                class_options = ["All Classes"] + EUROSAT_CLASSES
+                selected_class_filter = st.selectbox(
+                    "Filter Samples by Class",
+                    class_options,
+                    index=0,
+                    help="Filter benchmark images by EuroSAT land cover category."
                 )
-                if sample_name:
-                    selected_image = Image.open(PUBLIC_REF_DIR / sample_name).convert("RGB")
+
+                if selected_class_filter == "All Classes":
+                    filtered_samples = all_samples
+                else:
+                    filtered_samples = [s for s in all_samples if selected_class_filter.lower() in s.name.lower()]
+
+                if filtered_samples:
+                    sample_options = {s.name: s for s in filtered_samples[:30]}
+                    chosen_sample_name = st.selectbox(
+                        "Select Evaluation Sample",
+                        list(sample_options.keys()),
+                        help="Select a benchmark sample from the public reference distillation pool."
+                    )
+                    if chosen_sample_name:
+                        sample_name = chosen_sample_name
+                        sample_path = sample_options[chosen_sample_name]
+                        selected_image = Image.open(sample_path).convert("RGB")
+            else:
+                st.info("No samples found in public reference pool. Upload an image above or click 'Generate Non-IID Partitions' in Tab 2.")
+
+        if sample_name:
+            for cls_cand in EUROSAT_CLASSES:
+                if cls_cand.lower() in sample_name.lower():
+                    ground_truth_label = cls_cand
+                    break
 
         if selected_image:
-            st.image(selected_image, caption="EuroSAT Image (64x64 RGB)", width=220)
+            st.image(selected_image, caption=f"Satellite Tile (64x64 RGB){f' | Ground Truth: {ground_truth_label}' if ground_truth_label else ''}", width=220)
+            if ground_truth_label:
+                st.markdown(f"**Ground Truth:** `{ground_truth_label}` {tip('Extracted ground truth land cover class for this benchmark tile.')}", unsafe_allow_html=True)
 
     with col_p2:
-        st.markdown(f"##### Model Inference Breakdown {tip('Demonstrates how individual models trained on skewed domains might disagree or have uncertainty, while the Common Knowledge Ensemble achieves high confidence through distillation consensus.')}", unsafe_allow_html=True)
+        st.markdown(f"##### Live PyTorch Inference & Knowledge Consensus {tip('Executes real-time forward pass across each edge architecture using saved weights. Shows individual model probabilities and the Common Knowledge Ensemble aggregate.')}", unsafe_allow_html=True)
         if selected_image:
-            # Multi-model prediction breakdown
-            model_evals = {
-                "Client 1 (ResNet-18)": {"Highway": 0.72, "Industrial": 0.18, "Residential": 0.10},
-                "Client 2 (MobileNetV3)": {"Highway": 0.65, "River": 0.20, "Forest": 0.15},
-                "Common Knowledge Ensemble": {"Highway": 0.81, "Industrial": 0.12, "Residential": 0.07},
-            }
+            # 1. Preprocess image using EuroSAT standard normalization
+            img_tensor = EVAL_TRANSFORM(selected_image).unsqueeze(0)  # Shape: [1, 3, 64, 64]
 
-            for model_lbl, probs in model_evals.items():
-                with st.expander(model_lbl, expanded=True):
-                    top_cls = max(probs, key=probs.get)
-                    top_conf = probs[top_cls] * 100
-                    st.write(f"**Predicted Class:** `{top_cls}` | **Confidence:** `{top_conf:.1f}%`")
-                    st.progress(probs[top_cls])
+            # 2. Determine target models from registered cluster or fallback reference
+            eval_nodes = {}
+            if cluster_data and cluster_data.get("clients"):
+                for cid, cinfo in cluster_data["clients"].items():
+                    eval_nodes[cid] = {
+                        "model_name": cinfo.get("model_name", "resnet18"),
+                        "device_name": cinfo.get("device_name", cid),
+                    }
+            else:
+                eval_nodes = {
+                    "client_1": {"model_name": "resnet18", "device_name": "Worker 1 (ResNet-18)"},
+                    "client_2": {"model_name": "mobilenetv3", "device_name": "Worker 2 (MobileNetV3)"},
+                }
+                st.caption("Note: Evaluating default model suite. Connect edge laptops to evaluate registered devices live.")
+
+            # 3. Execute PyTorch inference per model
+            model_results = []
+            for cid, cmeta in eval_nodes.items():
+                m_name = cmeta["model_name"]
+                d_name = cmeta["device_name"]
+
+                try:
+                    m_instance = get_model(m_name, num_classes=len(EUROSAT_CLASSES))
+                    m_instance.eval()
+                except Exception as e:
+                    continue
+
+                weights_dir = Path("weights") / cid
+                latest_pt = weights_dir / "latest.pt"
+                is_trained = False
+                badge = "[Untrained Baseline]"
+
+                if latest_pt.exists():
+                    try:
+                        state_dict = torch.load(latest_pt, map_location="cpu")
+                        m_instance.load_state_dict(state_dict)
+                        badge = "[Trained Checkpoint (Latest)]"
+                        is_trained = True
+                    except Exception as e:
+                        badge = f"[Weight Load Error: {e}]"
+                else:
+                    round_files = sorted(weights_dir.glob("model_round_*.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if round_files:
+                        try:
+                            state_dict = torch.load(round_files[0], map_location="cpu")
+                            m_instance.load_state_dict(state_dict)
+                            badge = f"[Trained Checkpoint ({round_files[0].stem})]"
+                            is_trained = True
+                        except Exception as e:
+                            badge = f"[Weight Load Error: {e}]"
+
+                summary = get_model_summary(m_instance)
+
+                with torch.no_grad():
+                    logits = m_instance(img_tensor)
+                    probs_arr = F.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+
+                top_idx = int(np.argmax(probs_arr))
+                top_cls = EUROSAT_CLASSES[top_idx]
+                top_prob = float(probs_arr[top_idx])
+                prob_dict = {cls_n: float(probs_arr[i]) for i, cls_n in enumerate(EUROSAT_CLASSES)}
+                top_3 = sorted(prob_dict.items(), key=lambda x: x[1], reverse=True)[:3]
+
+                model_results.append({
+                    "client_id": cid,
+                    "model_name": m_name,
+                    "display_name": d_name,
+                    "summary": summary,
+                    "is_trained": is_trained,
+                    "badge": badge,
+                    "top_class": top_cls,
+                    "top_prob": top_prob,
+                    "probs": prob_dict,
+                    "probs_arr": probs_arr,
+                    "top_3": top_3,
+                })
+
+            if model_results:
+                # 4. Compute Common Knowledge Ensemble (Probability consensus)
+                stacked_probs = np.stack([m["probs_arr"] for m in model_results], axis=0)
+                ensemble_probs_arr = np.mean(stacked_probs, axis=0)
+                ens_top_idx = int(np.argmax(ensemble_probs_arr))
+                ens_top_cls = EUROSAT_CLASSES[ens_top_idx]
+                ens_top_prob = float(ensemble_probs_arr[ens_top_idx])
+                ensemble_prob_dict = {cls_n: float(ensemble_probs_arr[i]) for i, cls_n in enumerate(EUROSAT_CLASSES)}
+                ensemble_top_3 = sorted(ensemble_prob_dict.items(), key=lambda x: x[1], reverse=True)[:3]
+
+                # Check consensus unanimity
+                unanimous = all(m["top_class"] == ens_top_cls for m in model_results)
+
+                # Hero Consensus Card
+                match_html = ""
+                if ground_truth_label:
+                    if ens_top_cls == ground_truth_label:
+                        match_html = f"<span style='color:#16A34A; font-weight:600;'>[CORRECT MATCH] Ensemble matches Ground Truth</span>"
+                    else:
+                        match_html = f"<span style='color:#DC2626; font-weight:600;'>[MISMATCH] Ground Truth: {ground_truth_label}</span>"
+
+                consensus_status_text = (
+                    "Unanimous Agreement: All heterogeneous models converged on the same class."
+                    if unanimous else
+                    "Consensus Harmonization: Disparate domain skews reconciled via logit averaging."
+                )
+
+                st.markdown(f"""
+                <div style='background-color:#F0FDF4; border:1px solid #BBF7D0; border-radius:8px; padding:1.2rem; margin-bottom:1.2rem;'>
+                    <div style='font-size:0.85rem; color:#15803D; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:0.3rem;'>
+                        Common Knowledge Ensemble {tip('Consensus prediction formed by averaging softmax output distributions across all active edge models.')}
+                    </div>
+                    <div style='display:flex; justify-content:space-between; align-items:baseline;'>
+                        <span style='font-size:1.6rem; font-weight:700; color:#14532D;'>{ens_top_cls}</span>
+                        <span style='font-size:1.3rem; font-weight:700; color:#15803D;'>{ens_top_prob * 100:.1f}% Confidence</span>
+                    </div>
+                    <div style='margin-top:0.4rem; font-size:0.85rem; color:#166534;'>
+                        {consensus_status_text}
+                    </div>
+                    {f"<div style='margin-top:0.4rem; font-size:0.85rem;'>{match_html}</div>" if match_html else ""}
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.progress(min(max(ens_top_prob, 0.0), 1.0))
+
+                # Display Top-3 for Ensemble
+                t3_str = " | ".join([f"**{c}**: {p*100:.1f}%" for c, p in ensemble_top_3])
+                st.caption(f"Top 3 Ensemble Candidates: {t3_str}")
+
+                st.markdown("<hr style='margin:1rem 0; border:0; border-top:1px solid #E2E8F0;'/>", unsafe_allow_html=True)
+
+                # 5. Individual Model Breakdowns
+                st.markdown(f"###### Individual Edge Model Predictions {tip('Inspect how each heterogeneous architecture performed individually on this satellite image.')}", unsafe_allow_html=True)
+                for res in model_results:
+                    with st.expander(f"{res['display_name']} - Predicted: {res['top_class']} ({res['top_prob']*100:.1f}%)", expanded=True):
+                        col_m1, col_m2 = st.columns([1, 1])
+                        with col_m1:
+                            st.write(f"**Architecture:** `{res['model_name']}` | **Params:** `{res['summary']['total_params']:,}`")
+                            st.write(f"**Status:** `{res['badge']}`")
+                        with col_m2:
+                            st.write(f"**Top Prediction:** `{res['top_class']}` ({res['top_prob']*100:.1f}%)")
+                            top_3_sub = " | ".join([f"{c}: {p*100:.1f}%" for c, p in res["top_3"]])
+                            st.caption(f"Top 3: {top_3_sub}")
+                        st.progress(min(max(res['top_prob'], 0.0), 1.0))
+
+                # 6. Comparative 10-Class Probability Spectrum Chart
+                st.markdown("<hr style='margin:1rem 0; border:0; border-top:1px solid #E2E8F0;'/>", unsafe_allow_html=True)
+                st.markdown(f"###### 10-Class Probability Spectrum Comparison {tip('Full probability distribution comparison across all 10 EuroSAT classes. Demonstrates how the ensemble balances out domain-specific biases.')}", unsafe_allow_html=True)
+
+                chart_data = []
+                for res in model_results:
+                    for cls_n in EUROSAT_CLASSES:
+                        chart_data.append({
+                            "Class": cls_n,
+                            "Probability": round(res["probs"][cls_n] * 100, 2),
+                            "Model": res["display_name"],
+                        })
+                for cls_n in EUROSAT_CLASSES:
+                    chart_data.append({
+                        "Class": cls_n,
+                        "Probability": round(ensemble_prob_dict[cls_n] * 100, 2),
+                        "Model": "Common Knowledge Ensemble",
+                    })
+
+                df_chart = pd.DataFrame(chart_data)
+                fig_comp = px.bar(
+                    df_chart,
+                    x="Class",
+                    y="Probability",
+                    color="Model",
+                    barmode="group",
+                    labels={"Probability": "Probability (%)", "Class": "EuroSAT Class"},
+                    title="Softmax Output Comparison Across Heterogeneous Architectures",
+                )
+                fig_comp.update_layout(
+                    height=360,
+                    margin=dict(l=20, r=20, t=40, b=40),
+                    font=dict(family="Inter, sans-serif", size=11),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_comp, use_container_width=True)
         else:
             st.info("Upload or select a satellite image to inspect model predictions.")

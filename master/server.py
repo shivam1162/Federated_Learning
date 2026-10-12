@@ -3,10 +3,12 @@ FastAPI Coordination Server for Heterogeneous FedMD.
 Orchestrates client registration, Non-IID dataset distribution, and logit consensus aggregation.
 """
 import time
+import shutil
 import threading
+from pathlib import Path
 from typing import Dict, List, Optional
 import numpy as np
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -408,6 +410,15 @@ def start_training(req: StartTrainingRequest):
         c.is_training = True
         c.current_round = 1
 
+    # Purge existing checkpoints on Coordinator for a fresh training run
+    weights_base = Path("weights")
+    if weights_base.exists():
+        for f in weights_base.glob("*/*.pt"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+
     return {
         "status": "started",
         "session_id": state.training_session_id,
@@ -541,3 +552,44 @@ def get_training_history():
         "history": [m.model_dump() for m in state.history],
         "stats": state.partition_stats,
     }
+
+
+@app.post("/api/upload_weights/{client_id}")
+async def upload_weights(client_id: str, file: UploadFile = File(...)):
+    """
+    Receives trained model checkpoint weights (.pt) uploaded by edge workers over LAN.
+    Saves to weights/{client_id}/latest.pt for centralized inference evaluation in Tab 4.
+    """
+    weights_dir = Path("weights") / client_id
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    out_file = weights_dir / "latest.pt"
+    with open(out_file, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    return {
+        "status": "success",
+        "client_id": client_id,
+        "filename": "latest.pt",
+        "size_bytes": out_file.stat().st_size
+    }
+
+
+@app.get("/api/weights_status")
+def get_weights_status():
+    """Returns status of stored model checkpoints for all active or registered clients."""
+    weights_base = Path("weights")
+    result = {}
+    if weights_base.exists():
+        for client_dir in weights_base.iterdir():
+            if client_dir.is_dir():
+                cid = client_dir.name
+                pt_files = sorted(client_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+                if pt_files:
+                    latest = pt_files[0]
+                    result[cid] = {
+                        "has_weights": True,
+                        "latest_file": latest.name,
+                        "size_mb": round(latest.stat().st_size / (1024 * 1024), 2),
+                        "mtime": latest.stat().st_mtime,
+                    }
+    return result
+
