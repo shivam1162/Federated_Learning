@@ -204,10 +204,14 @@ The web dashboard (`master/dashboard.py`) follows an enterprise, professional de
      * Local validation accuracy progression per client.
      * Consensus agreement score (cosine similarity of logits across disparate models over rounds).
 4. **Interactive Satellite Inference Playground Tab**:
-   * Drag-and-drop or select sample EuroSAT images.
-   * Side-by-side breakdown:
-     * Individual model predictions & confidence progress bars.
-     * **Common Knowledge Ensemble** final classification.
+   * Drag-and-drop custom 64x64 satellite tiles or filter benchmark samples across all 10 EuroSAT land cover classes.
+   * Ground truth detection and verification badge (`[CORRECT MATCH]` vs `[MISMATCH]`).
+   * **Live PyTorch Evaluation**: Executes real-time forward passes on CPU across all connected heterogeneous models using trained `.pt` checkpoints (or baseline initial weights).
+   * **Consensus Analytics**: Highlights whether models reached unanimous agreement or if the ensemble reconciled domain-biased divergence.
+   * **Visual Telemetry**:
+     * Hero consensus card with confidence progress bar and Top-3 candidate ranking.
+     * Expandable individual model breakdown cards with architecture parameter counts and weights status badges.
+     * Comparative Plotly grouped bar chart showing the full 10-class probability spectrum across all disparate architectures and the Common Knowledge Ensemble.
 
 ---
 
