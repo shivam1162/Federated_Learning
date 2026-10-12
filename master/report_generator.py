@@ -378,35 +378,49 @@ def build_training_pdf_report(
     # 6. Round-by-Round Metrics Table
     if history:
         story.append(Paragraph("5. Communication Rounds Progression Metrics", section_header_style))
-        round_headers = [
-            Paragraph("<b>Round</b>", tbl_header_style),
-            Paragraph("<b>Worker 1 Loss</b>", tbl_header_style),
-            Paragraph("<b>Worker 1 Acc</b>", tbl_header_style),
-            Paragraph("<b>Worker 2 Loss</b>", tbl_header_style),
-            Paragraph("<b>Worker 2 Acc</b>", tbl_header_style),
-            Paragraph("<b>Consensus Agreement</b>", tbl_header_style),
-        ]
+        # Determine client IDs present in history
+        history_client_ids = []
+        for h in history:
+            for cid in h.get("client_metrics", {}).keys():
+                if cid not in history_client_ids:
+                    history_client_ids.append(cid)
+
+        if not history_client_ids:
+            history_client_ids = ["client_1", "client_2"]
+
+        num_c = len(history_client_ids)
+        r_width = 0.85 * inch
+        agree_width = 1.35 * inch
+        rem_width = (7.2 * inch) - r_width - agree_width
+        col_c_width = rem_width / max(num_c, 1)
+        col_widths = [r_width] + [col_c_width] * num_c + [agree_width]
+
+        round_headers = [Paragraph("<b>Round</b>", tbl_header_style)]
+        for cid in history_client_ids:
+            c_label = cid.replace("_", " ").title()
+            round_headers.append(Paragraph(f"<b>{c_label} (Loss / Acc)</b>", tbl_header_style))
+        round_headers.append(Paragraph("<b>Consensus Agreement</b>", tbl_header_style))
+
         round_rows = [round_headers]
 
         for h in history:
             r_num = h.get("round_num", 1)
             cm = h.get("client_metrics", {})
-            c1_loss = cm.get("client_1", {}).get("loss", 0.0)
-            c1_acc = cm.get("client_1", {}).get("acc", 0.0)
-            c2_loss = cm.get("client_2", {}).get("loss", 0.0)
-            c2_acc = cm.get("client_2", {}).get("acc", 0.0)
             agree = h.get("agreement_score", 0.0)
 
-            round_rows.append([
-                Paragraph(f"Round {r_num}", tbl_cell_style),
-                Paragraph(f"{c1_loss:.4f}" if c1_loss else "N/A", tbl_cell_style),
-                Paragraph(f"{c1_acc:.2f}%" if c1_acc else "N/A", tbl_cell_style),
-                Paragraph(f"{c2_loss:.4f}" if c2_loss else "N/A", tbl_cell_style),
-                Paragraph(f"{c2_acc:.2f}%" if c2_acc else "N/A", tbl_cell_style),
-                Paragraph(f"{agree:.4f}", tbl_cell_style),
-            ])
+            row = [Paragraph(f"Round {r_num}", tbl_cell_style)]
+            for cid in history_client_ids:
+                c_data = cm.get(cid, {})
+                c_loss = c_data.get("loss", 0.0)
+                c_acc = c_data.get("acc", 0.0)
+                if c_loss or c_acc:
+                    row.append(Paragraph(f"Loss: {c_loss:.3f} | <b>{c_acc:.1f}%</b>", tbl_cell_style))
+                else:
+                    row.append(Paragraph("N/A", tbl_cell_style))
+            row.append(Paragraph(f"<b>{agree:.4f}</b>", tbl_cell_style))
+            round_rows.append(row)
 
-        round_table = Table(round_rows, colWidths=[1.0 * inch, 1.2 * inch, 1.2 * inch, 1.2 * inch, 1.2 * inch, 1.4 * inch])
+        round_table = Table(round_rows, colWidths=col_widths)
         round_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F172A")),
             ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#CBD5E1")),
